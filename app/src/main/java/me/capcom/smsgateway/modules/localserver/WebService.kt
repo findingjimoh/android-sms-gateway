@@ -40,7 +40,9 @@ import me.capcom.smsgateway.modules.localserver.domain.Device
 import me.capcom.smsgateway.modules.localserver.routes.AuthRoutes
 import me.capcom.smsgateway.modules.localserver.routes.DocsRoutes
 import me.capcom.smsgateway.modules.localserver.routes.LogsRoutes
+import me.capcom.smsgateway.modules.localserver.routes.ConversationsRoutes
 import me.capcom.smsgateway.modules.localserver.routes.MessagesRoutes
+import me.capcom.smsgateway.modules.receiver.ConversationsService
 import me.capcom.smsgateway.modules.localserver.routes.WebhooksRoutes
 import me.capcom.smsgateway.modules.notifications.NotificationsService
 import org.koin.android.ext.android.get
@@ -167,6 +169,14 @@ class WebService : Service() {
                         }
                     }
 
+                    ConversationsRoutes(applicationContext, ConversationsService()).let {
+                        route("/conversations") {
+                            it.register(this)
+                        }
+                        route("/messages/received") {
+                            it.registerReceivedRoute(this)
+                        }
+                    }
                     route("/logs") {
                         LogsRoutes(get()).register(this)
                     }
