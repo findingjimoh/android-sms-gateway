@@ -125,6 +125,14 @@ class GatewayApi(
         }.body()
     }
 
+    suspend fun pushInbox(token: String, messages: List<InboxPushRequest>) {
+        client.post("$baseUrl/inbox") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody(messages)
+        }
+    }
+
     ///////////////////////////////////////////////////////////////////////////
     private fun HttpRequestBuilder.bearerAuth(token: String) {
         header(HttpHeaders.Authorization, "Bearer $token")
@@ -171,6 +179,14 @@ class GatewayApi(
     data class GetUserCodeResponse(
         val code: String,
         val validUntil: Date
+    )
+
+    data class InboxPushRequest(
+        val phoneNumber: String,
+        val body: String,
+        val isEncrypted: Boolean = false,
+        val receivedAt: Date,
+        val externalId: String,
     )
 
     ////////////////////////////////////////////////////////////////////////////////////////////////

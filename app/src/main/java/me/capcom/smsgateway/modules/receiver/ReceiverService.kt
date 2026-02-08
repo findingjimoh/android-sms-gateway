@@ -8,6 +8,7 @@ import me.capcom.smsgateway.helpers.SubscriptionsHelper
 import me.capcom.smsgateway.modules.logs.LogsService
 import me.capcom.smsgateway.modules.logs.db.LogEntry
 import me.capcom.smsgateway.modules.receiver.data.InboxMessage
+import me.capcom.smsgateway.modules.gateway.workers.InboxPushWorker
 import me.capcom.smsgateway.modules.webhooks.WebHooksService
 import me.capcom.smsgateway.modules.webhooks.domain.WebHookEvent
 import me.capcom.smsgateway.modules.webhooks.payload.MmsReceivedPayload
@@ -100,6 +101,25 @@ class ReceiverService : KoinComponent {
         }
 
         webHooksService.emit(context, type, payload)
+
+        // Push to server inbox for MCP tool access
+        when (message) {
+            is InboxMessage.Text -> InboxPushWorker.start(
+                context,
+                phoneNumber = message.address,
+                body = message.text,
+                receivedAt = message.date,
+                externalId = "sms_${message.hashCode().toUInt().toString(16)}"
+            )
+            is InboxMessage.Mms -> InboxPushWorker.start(
+                context,
+                phoneNumber = message.address,
+                body = message.subject ?: "[MMS: media message]",
+                receivedAt = message.date,
+                externalId = "mms_${message.transactionId}"
+            )
+            is InboxMessage.Data -> {} // skip data messages
+        }
 
         logsService.insert(
             LogEntry.Priority.DEBUG,

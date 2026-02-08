@@ -1,8 +1,11 @@
 package me.capcom.smsgateway.modules.gateway
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
+import android.provider.Telephony
 import io.ktor.client.plugins.ClientRequestException
+import io.ktor.client.plugins.ServerResponseException
 import io.ktor.http.HttpStatusCode
 import me.capcom.smsgateway.data.entities.MessageWithRecipients
 import me.capcom.smsgateway.domain.EntitySource
@@ -10,6 +13,7 @@ import me.capcom.smsgateway.domain.MessageContent
 import me.capcom.smsgateway.modules.events.EventBus
 import me.capcom.smsgateway.modules.gateway.events.DeviceRegisteredEvent
 import me.capcom.smsgateway.modules.gateway.services.SSEForegroundService
+import me.capcom.smsgateway.modules.gateway.workers.InboxSyncWorker
 import me.capcom.smsgateway.modules.gateway.workers.PullMessagesWorker
 import me.capcom.smsgateway.modules.gateway.workers.SendStateWorker
 import me.capcom.smsgateway.modules.gateway.workers.SettingsUpdateWorker
@@ -47,6 +51,7 @@ class GatewayService(
         PullMessagesWorker.start(context)
         WebhooksUpdateWorker.start(context)
         SettingsUpdateWorker.start(context)
+        InboxSyncWorker.start(context)
 
         eventsReceiver.start()
     }
@@ -302,6 +307,166 @@ class GatewayService(
         )
             .getDevice(settings.registrationInfo?.token)
             .externalIp
+    }
+    //endregion
+
+    //region Inbox Sync
+    internal suspend fun syncInbox(context: Context) {
+        val reg = settings.registrationInfo
+        android.util.Log.i("InboxSync", "syncInbox: registrationInfo=${reg != null}")
+        if (reg == null) return
+
+        syncSmsPages(context, reg.token)
+        syncMmsPages(context, reg.token)
+        android.util.Log.i("InboxSync", "syncInbox: done")
+    }
+
+    private suspend fun syncSmsPages(context: Context, token: String) {
+        val batchSize = 100
+        var offset = 0
+        while (true) {
+            val batch = readSmsPage(context, batchSize, offset)
+            android.util.Log.i("InboxSync", "SMS batch offset=$offset size=${batch.size}")
+            if (batch.isEmpty()) break
+            pushBatch(token, batch)
+            offset += batchSize
+        }
+    }
+
+    private suspend fun syncMmsPages(context: Context, token: String) {
+        val batchSize = 100
+        var offset = 0
+        while (true) {
+            val batch = readMmsPage(context, batchSize, offset)
+            if (batch.isEmpty()) break
+            pushBatch(token, batch)
+            offset += batchSize
+        }
+    }
+
+    private suspend fun pushBatch(token: String, payload: List<GatewayApi.InboxPushRequest>) {
+        try {
+            api.pushInbox(token, payload)
+            android.util.Log.i("InboxSync", "Pushed ${payload.size} messages")
+        } catch (e: ClientRequestException) {
+            if (e.response.status.value != 409) throw e
+        } catch (e: ServerResponseException) {
+            // Server returns 500 for duplicates in some cases, safe to ignore
+            android.util.Log.w("InboxSync", "Server error (ignored): ${e.message}")
+        }
+    }
+
+    private fun readSmsPage(context: Context, limit: Int, offset: Int): List<GatewayApi.InboxPushRequest> {
+        val projection = arrayOf(
+            Telephony.Sms._ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+        )
+
+        val cursor = context.contentResolver.query(
+            Telephony.Sms.Inbox.CONTENT_URI,
+            projection,
+            null,
+            null,
+            "${Telephony.Sms.DATE} ASC LIMIT $limit OFFSET $offset"
+        ) ?: return emptyList()
+
+        val results = mutableListOf<GatewayApi.InboxPushRequest>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val id = it.getLong(0)
+                val address = it.getString(1) ?: continue
+                val body = it.getString(2) ?: ""
+                val date = it.getLong(3)
+                results.add(
+                    GatewayApi.InboxPushRequest(
+                        phoneNumber = address,
+                        body = body,
+                        receivedAt = Date(date),
+                        externalId = "sms_$id"
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    private fun readMmsPage(context: Context, limit: Int, offset: Int): List<GatewayApi.InboxPushRequest> {
+        val mmsUri = Uri.parse("content://mms/")
+        val cursor = context.contentResolver.query(
+            mmsUri,
+            arrayOf("_id", "date", "sub"),
+            "msg_box = 1", // inbox only
+            null,
+            "date ASC LIMIT $limit OFFSET $offset"
+        ) ?: return emptyList()
+
+        val results = mutableListOf<GatewayApi.InboxPushRequest>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val id = it.getLong(0)
+                val dateSec = it.getLong(1)
+                val subject = it.getString(2)
+
+                val address = getMmsAddress(context, id) ?: continue
+                val body = getMmsTextBody(context, id)
+                    ?: subject?.let { s -> "[MMS: $s]" }
+                    ?: "[MMS: media message]"
+
+                results.add(
+                    GatewayApi.InboxPushRequest(
+                        phoneNumber = address,
+                        body = body,
+                        receivedAt = Date(dateSec * 1000), // MMS date is in seconds
+                        externalId = "mms_$id"
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    private fun getMmsAddress(context: Context, mmsId: Long): String? {
+        val uri = Uri.parse("content://mms/$mmsId/addr")
+        val cursor = context.contentResolver.query(
+            uri,
+            arrayOf("address", "type"),
+            null, null, null
+        ) ?: return null
+
+        val addresses = mutableListOf<String>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val addr = it.getString(0)
+                if (!addr.isNullOrBlank() && addr != "insert-address-token") {
+                    addresses.add(addr)
+                }
+            }
+        }
+        return if (addresses.isEmpty()) null else addresses.distinct().joinToString(";")
+    }
+
+    private fun getMmsTextBody(context: Context, mmsId: Long): String? {
+        val uri = Uri.parse("content://mms/part")
+        val cursor = context.contentResolver.query(
+            uri,
+            arrayOf("_id", "ct", "text"),
+            "mid = ?",
+            arrayOf(mmsId.toString()),
+            null
+        ) ?: return null
+
+        cursor.use {
+            while (it.moveToNext()) {
+                val contentType = it.getString(1)
+                if (contentType == "text/plain") {
+                    val text = it.getString(2)
+                    if (!text.isNullOrBlank()) return text
+                }
+            }
+        }
+        return null
     }
     //endregion
 }
