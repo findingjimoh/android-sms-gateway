@@ -13,6 +13,9 @@ Per-message worker that pushes newly received SMS/MMS to the server immediately 
 ### Group MMS
 `getMmsAddress()` returns all participants' phone numbers joined by `;` instead of only the FROM address.
 
+### SSE Reconnect Pull
+When the SSE connection is established (or re-established after being killed), `SSEForegroundService` immediately triggers `PullMessagesWorker` to fetch any pending outbound messages that were queued while the app was offline.
+
 ### API Extension (`GatewayApi.pushInbox`)
 New endpoint method and `InboxPushRequest` DTO for batch inbox push.
 
@@ -23,6 +26,7 @@ New endpoint method and `InboxPushRequest` DTO for batch inbox push.
 | `modules/gateway/GatewayApi.kt` | Added `pushInbox()` + `InboxPushRequest` |
 | `modules/gateway/GatewayService.kt` | Added `syncInbox()`, content provider readers, group MMS |
 | `modules/receiver/ReceiverService.kt` | Added real-time push via `InboxPushWorker` |
+| `modules/gateway/services/SSEForegroundService.kt` | Pull pending messages on SSE connect |
 
 ## Files Added
 

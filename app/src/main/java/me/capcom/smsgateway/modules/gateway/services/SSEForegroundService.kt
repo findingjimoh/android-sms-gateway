@@ -15,6 +15,7 @@ import me.capcom.smsgateway.modules.events.ExternalEventType
 import me.capcom.smsgateway.modules.gateway.GatewaySettings
 import me.capcom.smsgateway.modules.logs.LogsService
 import me.capcom.smsgateway.modules.logs.db.LogEntry
+import me.capcom.smsgateway.modules.gateway.workers.PullMessagesWorker
 import me.capcom.smsgateway.modules.notifications.NotificationsService
 import me.capcom.smsgateway.modules.orchestrator.EventsRouter
 import org.koin.android.ext.android.inject
@@ -47,6 +48,10 @@ class SSEForegroundService : Service() {
             ) { "Authentication token is required for SSE connection" }
         )
             .apply {
+                onConnected = {
+                    Log.d("SSEForegroundService", "SSE connected, pulling pending messages")
+                    PullMessagesWorker.start(this@SSEForegroundService)
+                }
                 onEvent = { event, data ->
                     Log.d("SSEForegroundService", "$event: $data")
 
